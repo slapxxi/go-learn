@@ -1,10 +1,34 @@
 package request
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 )
+
+type chunkReader struct {
+	data            string
+	numBytesPerRead int
+	pos             int
+}
+
+func (cr *chunkReader) Read(p []byte) (n int, err error) {
+	if cr.pos >= len(cr.data) {
+		return 0, io.EOF
+	}
+	endIndex := cr.pos + cr.numBytesPerRead
+	if endIndex > len(cr.data) {
+		endIndex = len(cr.data)
+	}
+	n = copy(p, cr.data[cr.pos:endIndex])
+	cr.pos += n
+	if n > cr.numBytesPerRead {
+		n = cr.numBytesPerRead
+		cr.pos -= n - cr.numBytesPerRead
+	}
+	return n, nil
+}
 
 type Request struct {
 	RequestLine RequestLine
@@ -18,11 +42,16 @@ type RequestLine struct {
 	HTTPVersion   string
 }
 
+func (r *RequestLine) ValidHTTP() bool {
+	return r.HTTPVersion == "1.1"
+}
+
 type Response struct {
 	Body io.ReadCloser
 }
 
 var ERROR_MALFORMED_RLINE = fmt.Errorf("malformed request line oopsie!")
+var ERROR_UNSUPPORTED_VERSION = fmt.Errorf("unsupported http version")
 var SEPARATOR = "\r\n"
 
 func parseRequestLine(s string) (*RequestLine, string, error) {
@@ -36,11 +65,19 @@ func parseRequestLine(s string) (*RequestLine, string, error) {
 	if len(parts) != 3 {
 		return nil, s, ERROR_MALFORMED_RLINE
 	}
-	return &RequestLine{
+	httpParts := strings.Split(parts[2], "/")
+	if len(httpParts) != 2 || httpParts[0] != "HTTP" {
+		return nil, s, ERROR_MALFORMED_RLINE
+	}
+	rl := &RequestLine{
 		Method:        parts[0],
 		RequestTarget: parts[1],
-		HTTPVersion:   parts[2],
-	}, restOfMsg, nil
+		HTTPVersion:   httpParts[1],
+	}
+	if !rl.ValidHTTP() {
+		return nil, s, ERROR_UNSUPPORTED_VERSION
+	}
+	return rl, restOfMsg, nil
 }
 
 func (r Request) Do() (*Response, error) {
@@ -48,16 +85,17 @@ func (r Request) Do() (*Response, error) {
 }
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
-	content, err := io.ReadAll(reader)
+	data, err := io.ReadAll(reader)
 	if err != nil {
-		panic(err)
+		return nil, errors.Join(fmt.Errorf("Unable to read contents"), err)
 	}
-	requestLine, _, err := parseRequestLine(string(content))
+	str := string(data)
+	rl, str, err := parseRequestLine(str)
 	if err != nil {
 		return nil, err
 	}
 	return &Request{
-		RequestLine: *requestLine,
+		RequestLine: *rl,
 		Headers:     nil,
 		Body:        nil,
 	}, nil
